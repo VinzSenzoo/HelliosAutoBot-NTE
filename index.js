@@ -14,6 +14,19 @@ const TOKEN_ADDRESS = "0xD4949664cD82660AaE99bEdc034a0deA8A0bd517";
 const BRIDGE_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000900";
 const STAKE_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000800";
 const CHAIN_ID = 42000;
+const availableChains = [11155111, 43113, 97, 80002];
+const chainNames = {
+  11155111: "Sepolia",
+  43113: "Fuji",
+  97: "BSC Testnet",
+  80002: "Amoy"
+};
+
+const availableValidators = [
+  { name: "helios-hedge", address: "0x007a1123a54cdd9ba35ad2012db086b9d8350a5f" },
+  { name: "helios-supra", address: "0x882f8a95409c127f0de7ba83b4dfa0096c3d8d79" }
+];
+
 const isDebug = false;
 
 let walletInfo = {
@@ -158,6 +171,7 @@ function getShortHash(hash) {
 function clearTransactionLogs() {
   transactionLogs = [];
   logBox.setContent('');
+  logBox.scrollTo(0);
   addLog("Transaction logs cleared.", "success");
 }
 
@@ -325,13 +339,12 @@ async function getNextNonce(provider, walletAddress) {
   }
 }
 
-async function bridge(wallet, amount, recipient) {
+async function bridge(wallet, amount, recipient, destChainId) {
   try {
     if (!wallet.address || !ethers.isAddress(wallet.address)) {
       throw new Error(`Invalid wallet address: ${wallet.address}`);
     }
     addLog(`Debug: Building bridge transaction for amount ${amount} HLS to ${getShortAddress(wallet.address)}`, "debug");
-    const destChainId = 11155111;
     const chainIdHex = ethers.toBeHex(destChainId).slice(2).padStart(64, '0');
     const offset = "00000000000000000000000000000000000000000000000000000000000000a0";
     const token = TOKEN_ADDRESS.toLowerCase().slice(2).padStart(64, '0');
@@ -428,19 +441,18 @@ async function bridge(wallet, amount, recipient) {
   }
 }
 
-async function stake(wallet, amount) {
+async function stake(wallet, amount, validatorAddress, validatorName) {
   try {
     if (!wallet.address || !ethers.isAddress(wallet.address)) {
       throw new Error(`Invalid wallet address: ${wallet.address}`);
     }
-    addLog(`Debug: Building stake transaction for amount ${amount} HLS`, "debug");
+    addLog(`Debug: Building stake transaction for amount ${amount} HLS to validator ${validatorName || validatorAddress}`, "debug");
     
-    const fixedAddress = "0x007a1123a54cdd9ba35ad2012db086b9d8350a5f";
     const fixedBytes = "ahelios";
     const abiCoder = ethers.AbiCoder.defaultAbiCoder();
     const encodedData = abiCoder.encode(
       ["address", "address", "uint256", "bytes"],
-      [wallet.address, fixedAddress, ethers.parseUnits(amount.toString(), 18), ethers.toUtf8Bytes(fixedBytes)]
+      [wallet.address, validatorAddress, ethers.parseUnits(amount.toString(), 18), ethers.toUtf8Bytes(fixedBytes)]
     );
     const inputData = "0xf5e56040" + encodedData.slice(2);
     
@@ -512,15 +524,19 @@ async function runDailyActivity() {
       }
       addLog(`Processing account ${accountIndex + 1}: ${getShortAddress(wallet.address)}`, "wait");
 
-      for (let bridgeCount = 1; bridgeCount <= dailyActivityConfig.bridgeRepetitions && !shouldStop; bridgeCount++) {
+      const shuffledChains = [...availableChains].sort(() => Math.random() - 0.5);
+
+      for (let bridgeCount = 0; bridgeCount < dailyActivityConfig.bridgeRepetitions && !shouldStop; bridgeCount++) {
+        const destChainId = shuffledChains[bridgeCount % shuffledChains.length];
+        const destChainName = chainNames[destChainId] || "Unknown";
         const amountHLS = (Math.random() * (dailyActivityConfig.maxHlsBridge - dailyActivityConfig.minHlsBridge) + dailyActivityConfig.minHlsBridge).toFixed(4);
         const amountWei = ethers.parseUnits(amountHLS, 18);
         try {
           const nativeBalance = await provider.getBalance(wallet.address);
           const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ["function balanceOf(address) view returns (uint256)"], provider);
           const hlsBalance = await tokenContract.balanceOf(wallet.address);
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount}: HLS Balance: ${ethers.formatUnits(hlsBalance, 18)}`, "wait");
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount}: Attempting to bridge ${amountHLS} HLS`, "info");
+          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: HLS Balance: ${ethers.formatUnits(hlsBalance, 18)}`, "wait");
+          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Bridge ${amountHLS} HLS Hellios ➯  ${destChainName}`, "info");
           let gasPrice = (await provider.getFeeData()).maxFeePerGas;
           if (!gasPrice) {
             gasPrice = ethers.parseUnits("1", "gwei");
@@ -529,21 +545,21 @@ async function runDailyActivity() {
           const gasLimit = BigInt(1500000);
           const gasCost = gasPrice * gasLimit;
           if (nativeBalance < gasCost) {
-            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount}: Insufficient native balance (${ethers.formatEther(nativeBalance)} HLS)`, "error");
+            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient native balance (${ethers.formatEther(nativeBalance)} HLS)`, "error");
             continue;
           }
           if (hlsBalance < amountWei) {
-            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount}: Insufficient HLS balance (${ethers.formatUnits(hlsBalance, 18)} HLS)`, "error");
+            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient HLS balance (${ethers.formatUnits(hlsBalance, 18)} HLS)`, "error");
             continue;
           }
           
-          await bridge(wallet, amountHLS, wallet.address);
-          await updateWalletData();
+          await bridge(wallet, amountHLS, wallet.address, destChainId);
+          await updateWallets();
         } catch (error) {
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount}: Failed: ${error.message}`, "error");
+          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Failed: ${error.message}`, "error");
         }
         
-        if (bridgeCount < dailyActivityConfig.bridgeRepetitions && !shouldStop) {
+        if (bridgeCount < dailyActivityConfig.bridgeRepetitions - 1 && !shouldStop) {
           const randomDelay = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
           addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next bridge...`, "delay");
           await sleep(randomDelay);
@@ -556,17 +572,20 @@ async function runDailyActivity() {
         await sleep(stakeDelay);
       }
       
-      for (let stakeCount = 1; stakeCount <= dailyActivityConfig.stakeRepetitions && !shouldStop; stakeCount++) {
+      const shuffledValidators = [...availableValidators].sort(() => Math.random() - 0.5);
+      
+      for (let stakeCount = 0; stakeCount < dailyActivityConfig.stakeRepetitions && !shouldStop; stakeCount++) {
+        const validator = shuffledValidators[stakeCount % shuffledValidators.length];
         const amountHLS = (Math.random() * (dailyActivityConfig.maxHlsStake - dailyActivityConfig.minHlsStake) + dailyActivityConfig.minHlsStake).toFixed(4);
         try {
-          addLog(`Account ${accountIndex + 1} - Stake ${stakeCount}: Attempting to stake ${amountHLS} HLS`, "info");
-          await stake(wallet, amountHLS);
-          await updateWalletData();
+          addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Stake ${amountHLS} HLS to ${validator.name}`, "info");
+          await stake(wallet, amountHLS, validator.address, validator.name);
+          await updateWallets();
         } catch (error) {
-          addLog(`Account ${accountIndex + 1} - Stake ${stakeCount}: Failed: ${error.message}`, "error");
+          addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Failed: ${error.message}`, "error");
         }
         
-        if (stakeCount < dailyActivityConfig.stakeRepetitions && !shouldStop) {
+        if (stakeCount < dailyActivityConfig.stakeRepetitions - 1 && !shouldStop) {
           const randomDelay = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
           addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next stake...`, "delay");
           await sleep(randomDelay);
@@ -684,7 +703,7 @@ const logBox = blessed.log({
   mouse: true,
   tags: true,
   scrollbar: { ch: "│", style: { bg: "cyan", fg: "white" }, track: { bg: "gray" } },
-  scrollback: 1000,
+  scrollback: 100, 
   smoothScroll: true,
   style: { border: { fg: "magenta" }, bg: "default", fg: "white" },
   padding: { left: 1, right: 1, top: 0, bottom: 0 },
@@ -927,7 +946,6 @@ async function updateWallets() {
 function updateLogs() {
   try {
     logBox.add(transactionLogs[transactionLogs.length - 1] || chalk.gray("No logs available."));
-    logBox.setScrollPerc(100);
     safeRender();
   } catch (error) {
     addLog(`Log update failed: ${error.message}`, "error");
