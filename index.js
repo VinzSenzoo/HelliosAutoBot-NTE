@@ -8,34 +8,42 @@ import { SocksProxyAgent } from "socks-proxy-agent";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
 
-const RPC_URL = "https://testnet1.helioschainlabs.org/";
-const CONFIG_FILE = "config.json";
-const TOKEN_ADDRESS = "0xD4949664cD82660AaE99bEdc034a0deA8A0bd517";
-const BRIDGE_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000900";
+const HELIOS_RPC_URL = "https://testnet1.helioschainlabs.org/";
+const HELIOS_CHAIN_ID = 42000;
+const HELIOS_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000900";
+const HELIOS_WETH_ADDRESS = "0x80b5a32E4F032B2a058b4F29EC95EEfEEB87aDcd";
 const STAKE_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000800";
-const CHAIN_ID = 42000;
-const availableChains = [11155111, 43113, 97, 80002];
-const chainNames = {
-  11155111: "Sepolia",
-  43113: "Fuji",
-  97: "BSC Testnet",
-  80002: "Amoy"
-};
+const SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+const SEPOLIA_CHAIN_ID = 11155111;
+const SEPOLIA_ROUTER_ADDRESS = "0x0f7C41147ad3b58F9804045593b078Fdd41919f3";
+const SEPOLIA_WETH_ADDRESS = "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9";
 
+const CONFIG_FILE = "config.json";
 const availableValidators = [
-  { name: "helios-hedge", address: "0x007a1123a54cdd9ba35ad2012db086b9d8350a5f" },
-  { name: "helios-supra", address: "0x882f8a95409c127f0de7ba83b4dfa0096c3d8d79" }
+  { name: "TOTO", address: "0x5CE41CE857fe26bC5Ebc4113a4b2DcfB46186D3E" },
+  { name: "Helios-Unity", address: "0x7e62c5e7Eba41fC8c25e605749C476C0236e0604" },
+  { name: "Helios-Peer", address: "0x72a9B3509B19D9Dbc2E0Df71c4A6451e8a3DD705" },
+  { name: "Helios-Supra", address: "0xa75a393FF3D17eA7D9c9105d5459769EA3EAEf8D" }
 ];
-
 const isDebug = false;
+
+const tokenAbi = [
+    "function balanceOf(address) view returns (uint256)",
+    "function allowance(address,address) view returns (uint256)",
+    "function approve(address,uint256) returns (bool)"
+  ];
 
 let walletInfo = {
   address: "N/A",
   balanceHLS: "0.0000",
+  balanceETH: "0.0000",
+  balanceWETH_Sepolia: "0.0000",
+  balanceWETH_Helios: "0.0000",
   activeAccount: "N/A"
 };
 let transactionLogs = [];
-let activityRunning = false;
+let isActivityRunning = false;
+let isScheduled = false;
 let isCycleRunning = false;
 let shouldStop = false;
 let dailyActivityInterval = null;
@@ -54,11 +62,14 @@ let activeProcesses = 0;
 
 let dailyActivityConfig = {
   bridgeRepetitions: 1,
-  minHlsBridge: 0.001,
-  maxHlsBridge: 0.004,
+  minWethBridge: 0.0001,
+  maxWethBridge: 0.0004,
   stakeRepetitions: 1,
   minHlsStake: 0.01,
-  maxHlsStake: 0.03
+  maxHlsStake: 0.03,
+  bridgeDelay: 30000,
+  stakeDelay: 10000,
+  accountDelay: 10000
 };
 
 function loadConfig() {
@@ -67,11 +78,14 @@ function loadConfig() {
       const data = fs.readFileSync(CONFIG_FILE, "utf8");
       const config = JSON.parse(data);
       dailyActivityConfig.bridgeRepetitions = Number(config.bridgeRepetitions) || 1;
-      dailyActivityConfig.minHlsBridge = Number(config.minHlsBridge) || 0.001;
-      dailyActivityConfig.maxHlsBridge = Number(config.maxHlsBridge) || 0.004;
+      dailyActivityConfig.minWethBridge = Number(config.minWethBridge) || 0.0001;
+      dailyActivityConfig.maxWethBridge = Number(config.maxWethBridge) || 0.0004;
       dailyActivityConfig.stakeRepetitions = Number(config.stakeRepetitions) || 1;
       dailyActivityConfig.minHlsStake = Number(config.minHlsStake) || 0.01;
       dailyActivityConfig.maxHlsStake = Number(config.maxHlsStake) || 0.03;
+      dailyActivityConfig.bridgeDelay = Number(config.bridgeDelay) || 30000;
+      dailyActivityConfig.stakeDelay = Number(config.stakeDelay) || 10000;
+      dailyActivityConfig.accountDelay = Number(config.accountDelay) || 10000;
     } else {
       addLog("No config file found, using default settings.", "info");
     }
@@ -89,39 +103,32 @@ function saveConfig() {
   }
 }
 
-async function makeJsonRpcCall(method, params) {
+async function makeJsonRpcCall(method, params, rpcUrl) {
   try {
     const id = uuidv4();
-    const proxyUrl = proxies[selectedWalletIndex % proxies.length] || null; 
+    const proxyUrl = proxies[selectedWalletIndex % proxies.length] || null;
     const agent = createAgent(proxyUrl);
-    const response = await axios.post(RPC_URL, {
+    const response = await axios.post(rpcUrl, {
       jsonrpc: "2.0",
       id,
       method,
       params
     }, {
       headers: { "Content-Type": "application/json" },
-      httpsAgent: agent 
+      httpsAgent: agent
     });
     const data = response.data;
-    if (data.error) {
-      throw new Error(`RPC Error: ${data.error.message} (code: ${data.error.code})`);
-    }
-    if (!data.result && data.result !== "") {
-      throw new Error("No result in RPC response");
-    }
+    if (data.error) throw new Error(`RPC Error: ${data.error.message} (code: ${data.error.code})`);
+    if (!data.result && data.result !== "") throw new Error("No result in RPC response");
     return data.result;
   } catch (error) {
-    const errorMessage = error.response
-      ? `HTTP ${error.response.status}: ${error.message}`
-      : error.message;
-    addLog(`JSON-RPC call failed (${method}): ${errorMessage}`, "error");
+    addLog(`JSON-RPC call failed (${method}): ${error.message}`, "error");
     throw error;
   }
 }
 
-process.on("unhandledRejection", (reason, promise) => {
-  addLog(`Unhandled Rejection at: ${promise}, reason: ${reason.message || reason}`, "error");
+process.on("unhandledRejection", (reason) => {
+  addLog(`Unhandled Rejection: ${reason.message || reason}`, "error");
 });
 
 process.on("uncaughtException", (error) => {
@@ -138,26 +145,13 @@ function addLog(message, type = "info") {
   const timestamp = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
   let coloredMessage;
   switch (type) {
-    case "error":
-      coloredMessage = chalk.redBright(message);
-      break;
-    case "success":
-      coloredMessage = chalk.greenBright(message);
-      break;
-    case "wait":
-      coloredMessage = chalk.yellowBright(message);
-      break;
-    case "info":
-      coloredMessage = chalk.whiteBright(message);
-      break;
-    case "delay":
-      coloredMessage = chalk.cyanBright(message);
-      break;
-    case "debug":
-      coloredMessage = chalk.blueBright(message);
-      break;
-    default:
-      coloredMessage = chalk.white(message);
+    case "error": coloredMessage = chalk.redBright(message); break;
+    case "success": coloredMessage = chalk.greenBright(message); break;
+    case "wait": coloredMessage = chalk.yellowBright(message); break;
+    case "info": coloredMessage = chalk.whiteBright(message); break;
+    case "delay": coloredMessage = chalk.cyanBright(message); break;
+    case "debug": coloredMessage = chalk.blueBright(message); break;
+    default: coloredMessage = chalk.white(message);
   }
   const logMessage = `[${timestamp}] ${coloredMessage}`;
   transactionLogs.push(logMessage);
@@ -205,47 +199,15 @@ function loadProxies() {
 
 function createAgent(proxyUrl) {
   if (!proxyUrl) return null;
-  if (proxyUrl.startsWith("socks")) {
-    return new SocksProxyAgent(proxyUrl);
-  } else {
-    return new HttpsProxyAgent(proxyUrl);
-  }
+  if (proxyUrl.startsWith("socks")) return new SocksProxyAgent(proxyUrl);
+  return new HttpsProxyAgent(proxyUrl);
 }
 
-function getProviderWithProxy(proxyUrl, maxRetries = 3) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const agent = createAgent(proxyUrl);
-      const fetchOptions = agent ? { agent } : {};
-      const provider = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: "Helios" }, { fetchOptions });
-      provider.getNetwork().then(network => {
-        if (Number(network.chainId) !== CHAIN_ID) {
-          throw new Error(`Network chain ID mismatch: expected ${CHAIN_ID}, got ${network.chainId}`);
-        }
-      }).catch(err => {
-        throw err;
-      });
-      return provider;
-    } catch (error) {
-      addLog(`Attempt ${attempt}/${maxRetries} failed to initialize provider: ${error.message}`, "error");
-      if (attempt < maxRetries) sleep(1000);
-    }
-  }
-  try {
-    addLog(`Proxy failed, falling back to direct connection`, "warn");
-    const provider = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: "Helios" });
-    provider.getNetwork().then(network => {
-      if (Number(network.chainId) !== CHAIN_ID) {
-        throw new Error(`Network chain ID mismatch: expected ${CHAIN_ID}, got ${network.chainId}`);
-      }
-    }).catch(err => {
-      throw err;
-    });
-    return provider;
-  } catch (error) {
-    addLog(`Fallback failed: ${error.message}`, "error");
-    throw error;
-  }
+function getProviderWithProxy(proxyUrl, rpcUrl, chainId) {
+  const agent = createAgent(proxyUrl);
+  const fetchOptions = agent ? { agent } : {};
+  const provider = new ethers.JsonRpcProvider(rpcUrl, { chainId, name: rpcUrl.includes("helios") ? "Helios" : "Sepolia" }, { fetchOptions });
+  return provider;
 }
 
 async function sleep(ms) {
@@ -259,9 +221,7 @@ async function sleep(ms) {
   activeProcesses++;
   try {
     await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve();
-      }, ms);
+      const timeout = setTimeout(resolve, ms);
       const checkStop = setInterval(() => {
         if (shouldStop) {
           clearTimeout(timeout);
@@ -274,37 +234,48 @@ async function sleep(ms) {
         }
       }, 100);
     });
-  } catch (error) {
-    addLog(`Sleep error: ${error.message}`, "error");
   } finally {
     activeProcesses = Math.max(0, activeProcesses - 1);
   }
 }
 
 async function updateWalletData() {
-  const tokenAbi = ["function balanceOf(address) view returns (uint256)"];
   const walletDataPromises = privateKeys.map(async (privateKey, i) => {
     try {
       const proxyUrl = proxies[i % proxies.length] || null;
-      const provider = getProviderWithProxy(proxyUrl);
-      const wallet = new ethers.Wallet(privateKey, provider);
-      
-      const tokenContract = new ethers.Contract(TOKEN_ADDRESS, tokenAbi, provider);
-      const hlsBalance = await tokenContract.balanceOf(wallet.address);
-      
+      const providerHelios = getProviderWithProxy(proxyUrl, HELIOS_RPC_URL, HELIOS_CHAIN_ID);
+      const providerSepolia = getProviderWithProxy(proxyUrl, SEPOLIA_RPC_URL, SEPOLIA_CHAIN_ID);
+      const walletHelios = new ethers.Wallet(privateKey, providerHelios);
+      const walletSepolia = new ethers.Wallet(privateKey, providerSepolia);
+
+      const hlsBalance = await providerHelios.getBalance(walletHelios.address);
       const formattedHLS = Number(ethers.formatUnits(hlsBalance, 18)).toFixed(4);
-      
-      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(wallet.address))}              ${chalk.bold.cyanBright(formattedHLS.padEnd(8))}`;
-      
+
+      const ethBalance = await providerSepolia.getBalance(walletSepolia.address);
+      const formattedETH = Number(ethers.formatUnits(ethBalance, 18)).toFixed(4);
+
+      const wethContractSepolia = new ethers.Contract(SEPOLIA_WETH_ADDRESS, tokenAbi, providerSepolia);
+      const wethBalanceSepolia = await wethContractSepolia.balanceOf(walletSepolia.address);
+      const formattedWETH_Sepolia = Number(ethers.formatUnits(wethBalanceSepolia, 18)).toFixed(4);
+
+      const wethContractHelios = new ethers.Contract(HELIOS_WETH_ADDRESS, tokenAbi, providerHelios);
+      const wethBalanceHelios = await wethContractHelios.balanceOf(walletHelios.address);
+      const formattedWETH_Helios = Number(ethers.formatUnits(wethBalanceHelios, 18)).toFixed(4);
+
+      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(walletHelios.address))}   ${chalk.bold.cyanBright(formattedHLS.padEnd(8))}  ${chalk.bold.cyanBright(formattedETH.padEnd(8))}  ${chalk.bold.cyanBright(formattedWETH_Sepolia.padEnd(8))}  ${chalk.bold.cyanBright(formattedWETH_Helios.padEnd(8))}`;
+
       if (i === selectedWalletIndex) {
-        walletInfo.address = wallet.address;
+        walletInfo.address = walletHelios.address;
         walletInfo.activeAccount = `Account ${i + 1}`;
         walletInfo.balanceHLS = formattedHLS;
+        walletInfo.balanceETH = formattedETH;
+        walletInfo.balanceWETH_Sepolia = formattedWETH_Sepolia;
+        walletInfo.balanceWETH_Helios = formattedWETH_Helios;
       }
       return formattedEntry;
     } catch (error) {
       addLog(`Failed to fetch wallet data for account #${i + 1}: ${error.message}`, "error");
-      return `${i === selectedWalletIndex ? "→ " : "  "}N/A 0.0000`;
+      return `${i === selectedWalletIndex ? "→ " : "  "}N/A 0.0000 0.0000 0.0000 0.0000`;
     }
   });
   try {
@@ -339,128 +310,103 @@ async function getNextNonce(provider, walletAddress) {
   }
 }
 
-async function bridge(wallet, amount, recipient, destChainId) {
+async function bridgeSepoliaToHelios(wallet, amount) {
   try {
-    if (!wallet.address || !ethers.isAddress(wallet.address)) {
-      throw new Error(`Invalid wallet address: ${wallet.address}`);
-    }
-    addLog(`Debug: Building bridge transaction for amount ${amount} HLS to ${getShortAddress(wallet.address)}`, "debug");
-    const chainIdHex = ethers.toBeHex(destChainId).slice(2).padStart(64, '0');
-    const offset = "00000000000000000000000000000000000000000000000000000000000000a0";
-    const token = TOKEN_ADDRESS.toLowerCase().slice(2).padStart(64, '0');
-    addLog(`Debug: Converting amount ${amount} to wei`, "debug");
+    addLog(`Debug: Starting bridge from Sepolia to Helios for ${amount} WETH`, "debug");
     const amountWei = ethers.parseUnits(amount.toString(), 18);
-    addLog(`Debug: amountWei: ${amountWei.toString()}`, "debug");
-    
-    let amountHexRaw;
-    try {
-      amountHexRaw = ethers.toBeHex(amountWei);
-      addLog(`Debug: amountHexRaw: ${amountHexRaw}`, "debug");
-    } catch (error) {
-      addLog(`Debug: Failed to convert amountWei to hex: ${error.message}`, "error");
-      throw new Error(`Hex conversion failed: ${error.message}`);
-    }
-    
-    let amountHex;
-    try {
-      amountHex = ethers.zeroPadValue(amountHexRaw, 32).slice(2);
-      addLog(`Debug: amountHex padded: ${amountHex}`, "debug");
-    } catch (error) {
-      addLog(`Debug: Failed to pad amountHex: ${error.message}`, "error");
-      throw new Error(`Hex padding failed: ${error.message}`);
-    }
-    
-    const gasParam = ethers.toBeHex(ethers.parseUnits("1", "gwei")).slice(2).padStart(64, '0');
-    addLog(`Debug: Encoding recipient ${recipient} as string`, "debug");
-    const recipientString = `0x${recipient.toLowerCase().slice(2)}`;
-    const recipientLength = ethers.toBeHex(recipientString.length).slice(2).padStart(64, '0');
-    const recipientPadded = Buffer.from(recipientString).toString('hex').padEnd(64, '0');
-    
-    const inputData = "0x7ae4a8ff" + 
-      chainIdHex + 
-      offset + 
-      token + 
-      amountHex + 
-      gasParam + 
-      recipientLength + 
-      recipientPadded;
-    addLog(`Debug: inputData: ${inputData}`, "debug");
-
-    const tokenAbi = [
-      "function allowance(address,address) view returns (uint256)",
-      "function approve(address,uint256) returns (bool)"
-    ];
-    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, tokenAbi, wallet);
-    const allowance = await tokenContract.allowance(wallet.address, BRIDGE_ROUTER_ADDRESS);
-    addLog(`Debug: Allowance: ${allowance.toString()}`, "debug");
+    const tokenContract = new ethers.Contract(SEPOLIA_WETH_ADDRESS, tokenAbi, wallet);
+    addLog(`Debug: Checking allowance for ${SEPOLIA_ROUTER_ADDRESS} on Sepolia`, "debug");
+    const allowance = await tokenContract.allowance(wallet.address, SEPOLIA_ROUTER_ADDRESS);
+    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} WETH`, "debug");
     if (allowance < amountWei) {
-      addLog(`Approving router to spend ${amount} HLS`, "info");
-      const approveTx = await tokenContract.approve(BRIDGE_ROUTER_ADDRESS, amountWei);
+      addLog(`Approving ${amount} WETH on Sepolia`, "info");
+      const approveTx = await tokenContract.approve(SEPOLIA_ROUTER_ADDRESS, amountWei);
       await approveTx.wait();
-      addLog("Approval successful", "success");
+      addLog(`Approval Sepolia ⮞ Helios Syccessfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
     }
 
-    const tx = {
-      to: BRIDGE_ROUTER_ADDRESS,
-      data: inputData,
-      gasLimit: 1500000,
-      chainId: CHAIN_ID,
-      nonce: await getNextNonce(wallet.provider, wallet.address)
-    };
-    addLog(`Debug: Transaction object: ${JSON.stringify(tx)}`, "debug");
-    
-    const sentTx = await wallet.sendTransaction(tx);
-    addLog(`Bridge transaction sent: ${getShortHash(sentTx.hash)}`, "success");
-    const receipt = await sentTx.wait();
-    
+    const routerContract = new ethers.Contract(SEPOLIA_ROUTER_ADDRESS, [
+      "function sendToHelios(address _tokenContract, bytes32 _destination, uint256 _amount, string _data)"
+    ], wallet);
+    const destination = ethers.zeroPadValue(ethers.toBeHex(HELIOS_CHAIN_ID), 32);
+    addLog(`Debug: Sending ${amount} WETH to Helios with destination chain ${HELIOS_CHAIN_ID}`, "debug");
+    const tx = await routerContract.sendToHelios(SEPOLIA_WETH_ADDRESS, destination, amountWei, "", {
+      gasLimit: 2000000
+    });
+    const receipt = await tx.wait();
     if (receipt.status === 0) {
       addLog(`Bridge transaction reverted: ${JSON.stringify(receipt)}`, "error");
       throw new Error("Transaction reverted");
     }
-    
-    try {
-      const historyResult = await makeJsonRpcCall("eth_getHyperionAccountTransferTxsByPageAndSize", [
-        wallet.address,
-        "0x1",
-        "0xa"
-      ]);
-    } catch (rpcError) {
-      addLog(`Failed to sync with portal via JSON-RPC: ${rpcError.message}`, "error");
-    }
-    
-    addLog("Bridge Transaction Confirmed And Synced With Portal", "success");
+    addLog(`Bridge Sepolia ⮞ Helios successful: ${getShortHash(tx.hash)}`, "success");
   } catch (error) {
-    addLog(`Bridge operation failed: ${error.message}`, "error");
-    if (error.reason) {
-      addLog(`Revert reason: ${error.reason}`, "error");
+    addLog(`Bridge Sepolia ⮞ Helios failed: ${error.message}`, "error");
+    throw error;
+  }
+}
+
+async function bridgeHeliosToSepolia(wallet, amount) {
+  try {
+    addLog(`Debug: Starting bridge from Helios to Sepolia for ${amount} WETH`, "debug");
+    const amountWei = ethers.parseUnits(amount.toString(), 18);
+    const tokenContract = new ethers.Contract(HELIOS_WETH_ADDRESS, tokenAbi, wallet);
+    addLog(`Debug: Checking allowance for ${HELIOS_ROUTER_ADDRESS} on Helios`, "debug");
+    const allowance = await tokenContract.allowance(wallet.address, HELIOS_ROUTER_ADDRESS);
+    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} WETH`, "debug");
+    if (allowance < amountWei) {
+      addLog(`Approving ${amount} WETH on Helios`, "info");
+      const approveTx = await tokenContract.approve(HELIOS_ROUTER_ADDRESS, amountWei);
+      await approveTx.wait();
+      addLog(`Approval WETH on Helios Successfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
     }
-    if (error.receipt) {
-      addLog(`Transaction receipt: ${JSON.stringify(error.receipt)}`, "debug");
+
+    const data = "0x7ae4a8ff" +
+      ethers.toBeHex(SEPOLIA_CHAIN_ID).slice(2).padStart(64, '0') +
+      "00000000000000000000000000000000000000000000000000000000000000a0" +
+      HELIOS_WETH_ADDRESS.toLowerCase().slice(2).padStart(64, '0') +
+      ethers.zeroPadValue(ethers.toBeHex(amountWei), 32).slice(2) +
+      ethers.toBeHex(ethers.parseUnits("0.5", 18)).slice(2).padStart(64, '0') +
+      ethers.toBeHex(wallet.address.length).slice(2).padStart(64, '0') +
+      Buffer.from(`0x${wallet.address.toLowerCase().slice(2)}`).toString('hex').padEnd(64, '0');
+
+    const tx = {
+      to: HELIOS_ROUTER_ADDRESS,
+      data,
+      gasLimit: 2000000,
+      chainId: HELIOS_CHAIN_ID,
+      nonce: await getNextNonce(wallet.provider, wallet.address)
+    };
+    addLog(`Debug: Sending bridge transaction  Helios ⮞ Sepolia: ${JSON.stringify(tx)}`, "debug");
+    const sentTx = await wallet.sendTransaction(tx);
+    const receipt = await sentTx.wait();
+    if (receipt.status === 0) {
+      addLog(`Bridge transaction reverted: ${JSON.stringify(receipt)}`, "error");
+      throw new Error("Transaction reverted");
     }
+    addLog(`Bridge Helios ⮞ Sepolia successful: ${getShortHash(sentTx.hash)}`, "success");
+  } catch (error) {
+    addLog(`Bridge Helios ⮞ Sepolia failed: ${error.message}`, "error");
     throw error;
   }
 }
 
 async function stake(wallet, amount, validatorAddress, validatorName) {
   try {
-    if (!wallet.address || !ethers.isAddress(wallet.address)) {
-      throw new Error(`Invalid wallet address: ${wallet.address}`);
-    }
+    if (!ethers.isAddress(wallet.address)) throw new Error(`Invalid wallet address: ${wallet.address}`);
     addLog(`Debug: Building stake transaction for amount ${amount} HLS to validator ${validatorName || validatorAddress}`, "debug");
-    
-    const fixedBytes = "ahelios";
+
     const abiCoder = ethers.AbiCoder.defaultAbiCoder();
     const encodedData = abiCoder.encode(
       ["address", "address", "uint256", "bytes"],
-      [wallet.address, validatorAddress, ethers.parseUnits(amount.toString(), 18), ethers.toUtf8Bytes(fixedBytes)]
+      [wallet.address, validatorAddress, ethers.parseUnits(amount.toString(), 18), ethers.toUtf8Bytes("ahelios")]
     );
     const inputData = "0xf5e56040" + encodedData.slice(2);
-    
+
     const tx = {
       to: STAKE_ROUTER_ADDRESS,
       data: inputData,
-      gasLimit: 1500000,
-      chainId: CHAIN_ID,
+      gasLimit: 2000000,
+      chainId: HELIOS_CHAIN_ID,
       nonce: await getNextNonce(wallet.provider, wallet.address)
     };
     addLog(`Debug: Stake transaction object: ${JSON.stringify(tx)}`, "debug");
@@ -471,22 +417,9 @@ async function stake(wallet, amount, validatorAddress, validatorName) {
       addLog(`Stake transaction reverted: ${JSON.stringify(receipt)}`, "error");
       throw new Error("Transaction reverted");
     }
-    
-    try {
-      const historyResult = await makeJsonRpcCall("eth_getAccountLastTransactionsInfo", [wallet.address]);
-    } catch (rpcError) {
-      addLog(`Failed to sync with portal via JSON-RPC: ${rpcError.message}`, "error");
-    }
-    
-    addLog("Stake Transaction Confirmed And Synced With Portal", "success");
+    addLog("Stake Transaction Successfully", "success");
   } catch (error) {
     addLog(`Stake operation failed: ${error.message}`, "error");
-    if (error.reason) {
-      addLog(`Revert reason: ${error.reason}`, "error");
-    }
-    if (error.receipt) {
-      addLog(`Transaction receipt: ${JSON.stringify(error.receipt)}`, "debug");
-    }
     throw error;
   }
 }
@@ -496,8 +429,8 @@ async function runDailyActivity() {
     addLog("No valid private keys found.", "error");
     return;
   }
-  addLog(`Starting daily activity for all accounts. Auto Bridge: ${dailyActivityConfig.bridgeRepetitions}x, Auto Stake: ${dailyActivityConfig.stakeRepetitions}x`, "info");
-  activityRunning = true;
+  addLog(`Starting daily activity. Bridge: ${dailyActivityConfig.bridgeRepetitions}x, Stake: ${dailyActivityConfig.stakeRepetitions}x`, "info");
+  isActivityRunning = true;
   isCycleRunning = true;
   shouldStop = false;
   hasLoggedSleepInterrupt = false;
@@ -508,93 +441,84 @@ async function runDailyActivity() {
       addLog(`Starting processing for account ${accountIndex + 1}`, "info");
       selectedWalletIndex = accountIndex;
       const proxyUrl = proxies[accountIndex % proxies.length] || null;
-      let provider;
       addLog(`Account ${accountIndex + 1}: Using Proxy ${proxyUrl || "none"}`, "info");
-      try {
-        provider = await getProviderWithProxy(proxyUrl);
-        await provider.getNetwork();
-      } catch (error) {
-        addLog(`Failed to connect to provider for account ${accountIndex + 1}: ${error.message}`, "error");
+      const providerHelios = getProviderWithProxy(proxyUrl, HELIOS_RPC_URL, HELIOS_CHAIN_ID);
+      const providerSepolia = getProviderWithProxy(proxyUrl, SEPOLIA_RPC_URL, SEPOLIA_CHAIN_ID);
+      const walletHelios = new ethers.Wallet(privateKeys[accountIndex], providerHelios);
+      const walletSepolia = new ethers.Wallet(privateKeys[accountIndex], providerSepolia);
+      if (!ethers.isAddress(walletHelios.address)) {
+        addLog(`Invalid wallet address for account ${accountIndex + 1}: ${walletHelios.address}`, "error");
         continue;
       }
-      const wallet = new ethers.Wallet(privateKeys[accountIndex], provider);
-      if (!ethers.isAddress(wallet.address)) {
-        addLog(`Invalid wallet address for account ${accountIndex + 1}: ${wallet.address}`, "error");
-        continue;
-      }
-      addLog(`Processing account ${accountIndex + 1}: ${getShortAddress(wallet.address)}`, "wait");
-
-      const shuffledChains = [...availableChains].sort(() => Math.random() - 0.5);
+      addLog(`Processing account ${accountIndex + 1}: ${getShortAddress(walletHelios.address)}`, "wait");
 
       for (let bridgeCount = 0; bridgeCount < dailyActivityConfig.bridgeRepetitions && !shouldStop; bridgeCount++) {
-        const destChainId = shuffledChains[bridgeCount % shuffledChains.length];
-        const destChainName = chainNames[destChainId] || "Unknown";
-        const amountHLS = (Math.random() * (dailyActivityConfig.maxHlsBridge - dailyActivityConfig.minHlsBridge) + dailyActivityConfig.minHlsBridge).toFixed(4);
-        const amountWei = ethers.parseUnits(amountHLS, 18);
+        const amountWETH = (Math.random() * (dailyActivityConfig.maxWethBridge - dailyActivityConfig.minWethBridge) + dailyActivityConfig.minWethBridge).toFixed(4);
+        const direction = bridgeCount % 2 === 0 ? "Sepolia ⮞ Helios" : "Helios ⮞ Sepolia";
+        addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: ${direction} ${amountWETH} WETH`, "info");
+        
         try {
-          const nativeBalance = await provider.getBalance(wallet.address);
-          const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ["function balanceOf(address) view returns (uint256)"], provider);
-          const hlsBalance = await tokenContract.balanceOf(wallet.address);
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: HLS Balance: ${ethers.formatUnits(hlsBalance, 18)}`, "wait");
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Bridge ${amountHLS} HLS Hellios ➯  ${destChainName}`, "info");
-          let gasPrice = (await provider.getFeeData()).maxFeePerGas;
-          if (!gasPrice) {
-            gasPrice = ethers.parseUnits("1", "gwei");
-            addLog(`Using default gas price: 1 gwei`, "info");
-          }
-          const gasLimit = BigInt(1500000);
-          const gasCost = gasPrice * gasLimit;
-          if (nativeBalance < gasCost) {
-            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient native balance (${ethers.formatEther(nativeBalance)} HLS)`, "error");
-            continue;
-          }
-          if (hlsBalance < amountWei) {
-            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient HLS balance (${ethers.formatUnits(hlsBalance, 18)} HLS)`, "error");
+          const tokenContract = new ethers.Contract(direction === "Sepolia ⮞ Helios" ? SEPOLIA_WETH_ADDRESS : HELIOS_WETH_ADDRESS, [
+            "function balanceOf(address) view returns (uint256)",
+            "function allowance(address,address) view returns (uint256)",
+            "function approve(address,uint256) returns (bool)"
+          ], direction === "Sepolia ⮞ Helios" ? providerSepolia : providerHelios);
+          const balance = await tokenContract.balanceOf(walletHelios.address);
+          const balanceFormatted = ethers.formatUnits(balance, 18);
+          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: WETH Balance: ${balanceFormatted}`, "wait");
+          if (balance < ethers.parseUnits(amountWETH, 18)) {
+            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient WETH balance (${balanceFormatted})`, "error");
             continue;
           }
           
-          await bridge(wallet, amountHLS, wallet.address, destChainId);
+          if (direction === "Sepolia ⮞ Helios") {
+            await bridgeSepoliaToHelios(walletSepolia, amountWETH);
+          } else {
+            await bridgeHeliosToSepolia(walletHelios, amountWETH);
+          }
           await updateWallets();
         } catch (error) {
           addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Failed: ${error.message}`, "error");
         }
         
         if (bridgeCount < dailyActivityConfig.bridgeRepetitions - 1 && !shouldStop) {
-          const randomDelay = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
-          addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next bridge...`, "delay");
-          await sleep(randomDelay);
+          addLog(`Account ${accountIndex + 1} - Waiting ${dailyActivityConfig.bridgeDelay / 1000} seconds before next bridge...`, "delay");
+          await sleep(dailyActivityConfig.bridgeDelay);
         }
       }
-      
+
       if (!shouldStop) {
-        const stakeDelay = Math.floor(Math.random() * (15000 - 10000 + 1)) + 10000;
-        addLog(`Waiting ${stakeDelay / 1000} seconds before staking...`, "wait");
-        await sleep(stakeDelay);
+        addLog(`Waiting ${dailyActivityConfig.stakeDelay / 1000} seconds before staking...`, "wait");
+        await sleep(dailyActivityConfig.stakeDelay);
       }
-      
+
       const shuffledValidators = [...availableValidators].sort(() => Math.random() - 0.5);
-      
       for (let stakeCount = 0; stakeCount < dailyActivityConfig.stakeRepetitions && !shouldStop; stakeCount++) {
         const validator = shuffledValidators[stakeCount % shuffledValidators.length];
         const amountHLS = (Math.random() * (dailyActivityConfig.maxHlsStake - dailyActivityConfig.minHlsStake) + dailyActivityConfig.minHlsStake).toFixed(4);
         try {
+          const hlsBalance = await providerHelios.getBalance(walletHelios.address);
+          addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: HLS Balance: ${ethers.formatUnits(hlsBalance, 18)}`, "wait");
+          if (hlsBalance < ethers.parseUnits(amountHLS, 18)) {
+            addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Insufficient HLS balance (${ethers.formatUnits(hlsBalance, 18)} HLS)`, "error");
+            continue;
+          }
           addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Stake ${amountHLS} HLS to ${validator.name}`, "info");
-          await stake(wallet, amountHLS, validator.address, validator.name);
+          await stake(walletHelios, amountHLS, validator.address, validator.name);
           await updateWallets();
         } catch (error) {
           addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Failed: ${error.message}`, "error");
         }
         
         if (stakeCount < dailyActivityConfig.stakeRepetitions - 1 && !shouldStop) {
-          const randomDelay = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
-          addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next stake...`, "delay");
-          await sleep(randomDelay);
+          addLog(`Account ${accountIndex + 1} - Waiting ${dailyActivityConfig.bridgeDelay / 1000} seconds before next stake...`, "delay");
+          await sleep(dailyActivityConfig.bridgeDelay);
         }
       }
-      
+
       if (accountIndex < privateKeys.length - 1 && !shouldStop) {
-        addLog(`Waiting 10 seconds before next account...`, "delay");
-        await sleep(10000);
+        addLog(`Waiting ${dailyActivityConfig.accountDelay / 1000} seconds before next account...`, "delay");
+        await sleep(dailyActivityConfig.accountDelay);
       }
     }
     if (!shouldStop && activeProcesses <= 0) {
@@ -604,40 +528,12 @@ async function runDailyActivity() {
   } catch (error) {
     addLog(`Daily activity failed: ${error.message}`, "error");
   } finally {
-    try {
-      if (shouldStop) {
-        const stopCheckInterval = setInterval(() => {
-          if (activeProcesses <= 0) {
-            clearInterval(stopCheckInterval);
-            if (dailyActivityInterval) {
-              clearTimeout(dailyActivityInterval);
-              dailyActivityInterval = null;
-              addLog("Cleared daily activity interval.", "info");
-            }
-            activityRunning = false;
-            isCycleRunning = false;
-            shouldStop = false;
-            hasLoggedSleepInterrupt = false;
-            activeProcesses = 0;
-            addLog("Daily activity stopped successfully.", "success");
-            updateMenu();
-            updateStatus();
-            safeRender();
-          } else {
-            addLog(`Waiting for ${activeProcesses} process to complete...`, "info");
-          }
-        }, 1000);
-      } else {
-        activityRunning = false;
-        isCycleRunning = activeProcesses > 0 || dailyActivityInterval !== null;
-        updateMenu();
-        updateStatus();
-        safeRender();
-      }
-      nonceTracker = {};
-    } catch (finalError) {
-      addLog(`Error in runDailyActivity cleanup: ${finalError.message}`, "error");
-    }
+    isActivityRunning = false;
+    isScheduled = dailyActivityInterval !== null;
+    isCycleRunning = isActivityRunning || isScheduled;
+    updateMenu();
+    updateStatus();
+    safeRender();
   }
 }
 
@@ -669,8 +565,7 @@ const statusBox = blessed.box({
   style: { fg: "white", bg: "default", border: { fg: "cyan" } },
   content: "Status: Initializing...",
   padding: { left: 1, right: 1, top: 0, bottom: 0 },
-  label: chalk.cyan(" Status "),
-  wrap: true
+  label: chalk.cyan(" Status ")
 });
 
 const walletBox = blessed.list({
@@ -703,7 +598,7 @@ const logBox = blessed.log({
   mouse: true,
   tags: true,
   scrollbar: { ch: "│", style: { bg: "cyan", fg: "white" }, track: { bg: "gray" } },
-  scrollback: 100, 
+  scrollback: 100,
   smoothScroll: true,
   style: { border: { fg: "magenta" }, bg: "default", fg: "white" },
   padding: { left: 1, right: 1, top: 0, bottom: 0 },
@@ -723,9 +618,7 @@ const menuBox = blessed.list({
   mouse: true,
   border: { type: "line" },
   style: { fg: "white", bg: "default", border: { fg: "red" }, selected: { bg: "magenta", fg: "black" }, item: { fg: "white" } },
-  items: isCycleRunning
-    ? ["Stop Activity", "Set Manual Config", "Clear Logs", "Refresh", "Exit"]
-    : ["Start Auto Daily Activity", "Set Manual Config", "Clear Logs", "Refresh", "Exit"],
+  items: ["Start Auto Daily Activity", "Set Manual Config", "Clear Logs", "Refresh", "Exit"],
   padding: { left: 1, top: 1 }
 });
 
@@ -739,16 +632,10 @@ const dailyActivitySubMenu = blessed.list({
   vi: true,
   mouse: true,
   border: { type: "line" },
-  style: {
-    fg: "white",
-    bg: "default",
-    border: { fg: "blue" },
-    selected: { bg: "blue", fg: "black" },
-    item: { fg: "white" }
-  },
+  style: { fg: "white", bg: "default", border: { fg: "blue" }, selected: { bg: "blue", fg: "black" }, item: { fg: "white" } },
   items: [
     "Set Bridge Repetitions",
-    "Set HLS Range For Bridge",
+    "Set WETH Range For Bridge",
     "Set Stake Repetitions",
     "Set HLS Range For Stake",
     "Back to Main Menu"
@@ -766,11 +653,7 @@ const configForm = blessed.form({
   keys: true,
   mouse: true,
   border: { type: "line" },
-  style: {
-    fg: "white",
-    bg: "default",
-    border: { fg: "blue" }
-  },
+  style: { fg: "white", bg: "default", border: { fg: "blue" } },
   padding: { left: 1, top: 1 },
   hidden: true
 });
@@ -779,7 +662,7 @@ const minLabel = blessed.text({
   parent: configForm,
   top: 0,
   left: 1,
-  content: "Min HLS:",
+  content: "Min Value:",
   style: { fg: "white" }
 });
 
@@ -787,7 +670,7 @@ const maxLabel = blessed.text({
   parent: configForm,
   top: 4,
   left: 1,
-  content: "Max HLS:",
+  content: "Max Value:",
   style: { fg: "white" }
 });
 
@@ -799,12 +682,7 @@ const configInput = blessed.textbox({
   height: 3,
   inputOnFocus: true,
   border: { type: "line" },
-  style: {
-    fg: "white",
-    bg: "default",
-    border: { fg: "white" },
-    focus: { border: { fg: "green" } }
-  }
+  style: { fg: "white", bg: "default", border: { fg: "white" }, focus: { border: { fg: "green" } } }
 });
 
 const configInputMax = blessed.textbox({
@@ -815,12 +693,7 @@ const configInputMax = blessed.textbox({
   height: 3,
   inputOnFocus: true,
   border: { type: "line" },
-  style: {
-    fg: "white",
-    bg: "default",
-    border: { fg: "white" },
-    focus: { border: { fg: "green" } }
-  }
+  style: { fg: "white", bg: "default", border: { fg: "white" }, focus: { border: { fg: "green" } } }
 });
 
 const configSubmitButton = blessed.button({
@@ -834,13 +707,7 @@ const configSubmitButton = blessed.button({
   border: { type: "line" },
   clickable: true,
   keys: true,
-  style: {
-    fg: "white",
-    bg: "blue",
-    border: { fg: "white" },
-    hover: { bg: "green" },
-    focus: { bg: "green", border: { fg: "yellow" } }
-  }
+  style: { fg: "white", bg: "blue", border: { fg: "white" }, hover: { bg: "green" }, focus: { bg: "green", border: { fg: "yellow" } } }
 });
 
 screen.append(headerBox);
@@ -891,25 +758,21 @@ function adjustLayout() {
   menuBox.top = headerBox.height + statusBox.height + walletBox.height;
   menuBox.width = Math.floor(screenWidth * 0.4);
   menuBox.height = screenHeight - (headerBox.height + statusBox.height + walletBox.height);
-
-  if (menuBox.top != null) {
-    dailyActivitySubMenu.top = menuBox.top;
-    dailyActivitySubMenu.width = menuBox.width;
-    dailyActivitySubMenu.height = menuBox.height;
-    dailyActivitySubMenu.left = menuBox.left;
-    configForm.width = Math.floor(screenWidth * 0.3);
-    configForm.height = Math.floor(screenHeight * 0.4);
-  }
-
+  dailyActivitySubMenu.top = menuBox.top;
+  dailyActivitySubMenu.width = menuBox.width;
+  dailyActivitySubMenu.height = menuBox.height;
+  dailyActivitySubMenu.left = menuBox.left;
+  configForm.width = Math.floor(screenWidth * 0.3);
+  configForm.height = Math.floor(screenHeight * 0.4);
   safeRender();
 }
 
 function updateStatus() {
   try {
-    const isProcessing = activityRunning || (isCycleRunning && dailyActivityInterval !== null);
-    const status = activityRunning
+    const isProcessing = isActivityRunning || (isScheduled && dailyActivityInterval !== null);
+    const status = isActivityRunning
       ? `${loadingSpinner[spinnerIndex]} ${chalk.yellowBright("Running")}`
-      : isCycleRunning && dailyActivityInterval !== null
+      : isScheduled && dailyActivityInterval !== null
       ? `${loadingSpinner[spinnerIndex]} ${chalk.yellowBright("Waiting for next cycle")}`
       : chalk.green("Idle");
     const statusText = `Status: ${status} | Active Account: ${getShortAddress(walletInfo.address)} | Total Accounts: ${privateKeys.length} | Auto Bridge: ${dailyActivityConfig.bridgeRepetitions}x | Auto Stake: ${dailyActivityConfig.stakeRepetitions}x | HELIOS AUTO BOT`;
@@ -933,8 +796,8 @@ function updateStatus() {
 async function updateWallets() {
   try {
     const walletData = await updateWalletData();
-    const header = `${chalk.bold.cyan("     Address").padEnd(12)}                   ${chalk.bold.cyan("HLS".padEnd(8))}`;
-    const separator = chalk.gray("-".repeat(49));
+    const header = `${chalk.bold.cyan("    Address").padEnd(12)}         ${chalk.bold.cyan("HLS".padEnd(8))} ${chalk.bold.cyan("ETH".padEnd(8))} ${chalk.bold.cyan("WETH_S".padEnd(4))}    ${chalk.bold.cyan("WETH_H")}`;
+    const separator = chalk.gray("-".repeat(100));
     walletBox.setItems([header, separator, ...walletData]);
     walletBox.select(0);
     safeRender();
@@ -954,11 +817,11 @@ function updateLogs() {
 
 function updateMenu() {
   try {
-    menuBox.setItems(
-      isCycleRunning
-        ? ["Stop Activity", "Set Manual Config", "Clear Logs", "Refresh", "Exit"]
-        : ["Start Auto Daily Activity", "Set Manual Config", "Clear Logs", "Refresh", "Exit"]
-    );
+    let menuItems = ["Set Manual Config", "Clear Logs", "Refresh", "Exit"];
+    if (isActivityRunning) menuItems.unshift("Stop Current Activity");
+    if (isScheduled && !isActivityRunning) menuItems.unshift("Cancel Scheduled Activity");
+    if (!isActivityRunning && !isScheduled) menuItems.unshift("Start Auto Daily Activity");
+    menuBox.setItems(menuItems);
     safeRender();
   } catch (error) {
     addLog(`Menu update failed: ${error.message}`, "error");
@@ -999,28 +862,23 @@ menuBox.on("select", async (item) => {
   switch (action) {
     case "Start Auto Daily Activity":
       if (isCycleRunning) {
-        addLog("Cycle is still running. Stop the current cycle first.", "error");
+        addLog("Cycle is still running. Stop or cancel the current cycle first.", "error");
       } else {
         await runDailyActivity();
       }
       break;
-    case "Stop Activity":
+    case "Stop Current Activity":
       shouldStop = true;
-      if (dailyActivityInterval) {
-        clearTimeout(dailyActivityInterval);
-        dailyActivityInterval = null;
-        addLog("Cleared daily activity interval.", "info");
-      }
-      addLog("Stopping daily activity. Please wait for ongoing process to complete.", "info");
-      safeRender();
+      addLog("Stopping current activity. Please wait for ongoing process to complete.", "info");
       const stopCheckInterval = setInterval(() => {
         if (activeProcesses <= 0) {
           clearInterval(stopCheckInterval);
-          activityRunning = false;
-          isCycleRunning = false;
+          isActivityRunning = false;
+          isCycleRunning = isScheduled;
           shouldStop = false;
           hasLoggedSleepInterrupt = false;
           activeProcesses = 0;
+          addLog("Current activity stopped successfully.", "success");
           updateMenu();
           updateStatus();
           safeRender();
@@ -1029,6 +887,18 @@ menuBox.on("select", async (item) => {
           safeRender();
         }
       }, 1000);
+      break;
+    case "Cancel Scheduled Activity":
+      if (dailyActivityInterval) {
+        clearTimeout(dailyActivityInterval);
+        dailyActivityInterval = null;
+        isScheduled = false;
+        isCycleRunning = false;
+        addLog("Scheduled activity canceled.", "info");
+        updateMenu();
+        updateStatus();
+        safeRender();
+      }
       break;
     case "Set Manual Config":
       menuBox.hide();
@@ -1050,6 +920,7 @@ menuBox.on("select", async (item) => {
       addLog("Data refreshed.", "success");
       break;
     case "Exit":
+      addLog("Exiting application", "info");
       clearInterval(statusInterval);
       process.exit(0);
   }
@@ -1074,13 +945,13 @@ dailyActivitySubMenu.on("select", (item) => {
         }
       }, 100);
       break;
-    case "Set HLS Range For Bridge":
-      configForm.configType = "hlsRangeBridge";
-      configForm.setLabel(" Enter HLS Range for Bridge ");
+    case "Set WETH Range For Bridge":
+      configForm.configType = "wethRangeBridge";
+      configForm.setLabel(" Enter WETH Range for Bridge ");
       minLabel.show();
       maxLabel.show();
-      configInput.setValue(dailyActivityConfig.minHlsBridge.toString());
-      configInputMax.setValue(dailyActivityConfig.maxHlsBridge.toString());
+      configInput.setValue(dailyActivityConfig.minWethBridge.toString());
+      configInputMax.setValue(dailyActivityConfig.maxWethBridge.toString());
       configInputMax.show();
       configForm.show();
       setTimeout(() => {
@@ -1143,10 +1014,10 @@ configForm.on("submit", () => {
   let value, maxValue;
   try {
     value = parseFloat(inputValue);
-    if (configForm.configType === "hlsRangeBridge" || configForm.configType === "hlsRangeStake") {
+    if (configForm.configType === "wethRangeBridge" || configForm.configType === "hlsRangeStake") {
       maxValue = parseFloat(configInputMax.getValue().trim());
       if (isNaN(maxValue) || maxValue <= 0) {
-        addLog("Invalid Max HLS value. Please enter a positive number.", "error");
+        addLog("Invalid Max value. Please enter a positive number.", "error");
         configInputMax.setValue("");
         screen.focusPush(configInputMax);
         safeRender();
@@ -1171,18 +1042,18 @@ configForm.on("submit", () => {
   if (configForm.configType === "bridgeRepetitions") {
     dailyActivityConfig.bridgeRepetitions = Math.floor(value);
     addLog(`Bridge Repetitions set to ${dailyActivityConfig.bridgeRepetitions}`, "success");
-  } else if (configForm.configType === "hlsRangeBridge") {
+  } else if (configForm.configType === "wethRangeBridge") {
     if (value > maxValue) {
-      addLog("Min HLS cannot be greater than Max HLS.", "error");
+      addLog("Min WETH cannot be greater than Max WETH.", "error");
       configInput.setValue("");
       configInputMax.setValue("");
       screen.focusPush(configInput);
       safeRender();
       return;
     }
-    dailyActivityConfig.minHlsBridge = value;
-    dailyActivityConfig.maxHlsBridge = maxValue;
-    addLog(`HLS Range for Bridge set to ${dailyActivityConfig.minHlsBridge} - ${dailyActivityConfig.maxHlsBridge}`, "success");
+    dailyActivityConfig.minWethBridge = value;
+    dailyActivityConfig.maxWethBridge = maxValue;
+    addLog(`WETH Range for Bridge set to ${dailyActivityConfig.minWethBridge} - ${dailyActivityConfig.maxWethBridge}`, "success");
   } else if (configForm.configType === "stakeRepetitions") {
     dailyActivityConfig.stakeRepetitions = Math.floor(value);
     addLog(`Stake Repetitions set to ${dailyActivityConfig.stakeRepetitions}`, "success");
@@ -1201,7 +1072,6 @@ configForm.on("submit", () => {
   }
   saveConfig();
   updateStatus();
-
   configForm.hide();
   dailyActivitySubMenu.show();
   setTimeout(() => {
@@ -1215,7 +1085,7 @@ configForm.on("submit", () => {
 });
 
 configInput.key(["enter"], () => {
-  if (configForm.configType === "hlsRangeBridge" || configForm.configType === "hlsRangeStake") {
+  if (configForm.configType === "wethRangeBridge" || configForm.configType === "hlsRangeStake") {
     screen.focusPush(configInputMax);
   } else {
     configForm.submit();
