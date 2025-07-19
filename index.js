@@ -11,16 +11,13 @@ import { v4 as uuidv4 } from "uuid";
 const HELIOS_RPC_URL = "https://testnet1.helioschainlabs.org/";
 const HELIOS_CHAIN_ID = 42000;
 const HELIOS_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000900";
-const HELIOS_WETH_ADDRESS = "0x80b5a32E4F032B2a058b4F29EC95EEfEEB87aDcd";
 const STAKE_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000800";
-const SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+const HLS_TOKEN_ADDRESS = "0xD4949664cD82660AaE99bEdc034a0deA8A0bd517";
 const SEPOLIA_CHAIN_ID = 11155111;
-const SEPOLIA_ROUTER_ADDRESS = "0x0f7C41147ad3b58F9804045593b078Fdd41919f3";
-const SEPOLIA_WETH_ADDRESS = "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9";
-
+const BSC_TESTNET_CHAIN_ID = 97;
 const CONFIG_FILE = "config.json";
+
 const availableValidators = [
-  { name: "TOTO", address: "0x5CE41CE857fe26bC5Ebc4113a4b2DcfB46186D3E" },
   { name: "Helios-Unity", address: "0x7e62c5e7Eba41fC8c25e605749C476C0236e0604" },
   { name: "Helios-Peer", address: "0x72a9B3509B19D9Dbc2E0Df71c4A6451e8a3DD705" },
   { name: "Helios-Supra", address: "0xa75a393FF3D17eA7D9c9105d5459769EA3EAEf8D" }
@@ -28,17 +25,14 @@ const availableValidators = [
 const isDebug = false;
 
 const tokenAbi = [
-    "function balanceOf(address) view returns (uint256)",
-    "function allowance(address,address) view returns (uint256)",
-    "function approve(address,uint256) returns (bool)"
-  ];
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)"
+];
 
 let walletInfo = {
   address: "N/A",
   balanceHLS: "0.0000",
-  balanceETH: "0.0000",
-  balanceWETH_Sepolia: "0.0000",
-  balanceWETH_Helios: "0.0000",
   activeAccount: "N/A"
 };
 let transactionLogs = [];
@@ -62,8 +56,8 @@ let activeProcesses = 0;
 
 let dailyActivityConfig = {
   bridgeRepetitions: 1,
-  minWethBridge: 0.0001,
-  maxWethBridge: 0.0004,
+  minHlsBridge: 0.01,
+  maxHlsBridge: 0.04,
   stakeRepetitions: 1,
   minHlsStake: 0.01,
   maxHlsStake: 0.03,
@@ -78,8 +72,8 @@ function loadConfig() {
       const data = fs.readFileSync(CONFIG_FILE, "utf8");
       const config = JSON.parse(data);
       dailyActivityConfig.bridgeRepetitions = Number(config.bridgeRepetitions) || 1;
-      dailyActivityConfig.minWethBridge = Number(config.minWethBridge) || 0.0001;
-      dailyActivityConfig.maxWethBridge = Number(config.maxWethBridge) || 0.0004;
+      dailyActivityConfig.minHlsBridge = Number(config.minHlsBridge) || 0.01;
+      dailyActivityConfig.maxHlsBridge = Number(config.maxHlsBridge) || 0.04;
       dailyActivityConfig.stakeRepetitions = Number(config.stakeRepetitions) || 1;
       dailyActivityConfig.minHlsStake = Number(config.minHlsStake) || 0.01;
       dailyActivityConfig.maxHlsStake = Number(config.maxHlsStake) || 0.03;
@@ -244,38 +238,22 @@ async function updateWalletData() {
     try {
       const proxyUrl = proxies[i % proxies.length] || null;
       const providerHelios = getProviderWithProxy(proxyUrl, HELIOS_RPC_URL, HELIOS_CHAIN_ID);
-      const providerSepolia = getProviderWithProxy(proxyUrl, SEPOLIA_RPC_URL, SEPOLIA_CHAIN_ID);
       const walletHelios = new ethers.Wallet(privateKey, providerHelios);
-      const walletSepolia = new ethers.Wallet(privateKey, providerSepolia);
 
       const hlsBalance = await providerHelios.getBalance(walletHelios.address);
       const formattedHLS = Number(ethers.formatUnits(hlsBalance, 18)).toFixed(4);
 
-      const ethBalance = await providerSepolia.getBalance(walletSepolia.address);
-      const formattedETH = Number(ethers.formatUnits(ethBalance, 18)).toFixed(4);
-
-      const wethContractSepolia = new ethers.Contract(SEPOLIA_WETH_ADDRESS, tokenAbi, providerSepolia);
-      const wethBalanceSepolia = await wethContractSepolia.balanceOf(walletSepolia.address);
-      const formattedWETH_Sepolia = Number(ethers.formatUnits(wethBalanceSepolia, 18)).toFixed(4);
-
-      const wethContractHelios = new ethers.Contract(HELIOS_WETH_ADDRESS, tokenAbi, providerHelios);
-      const wethBalanceHelios = await wethContractHelios.balanceOf(walletHelios.address);
-      const formattedWETH_Helios = Number(ethers.formatUnits(wethBalanceHelios, 18)).toFixed(4);
-
-      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(walletHelios.address))}   ${chalk.bold.cyanBright(formattedHLS.padEnd(8))}  ${chalk.bold.cyanBright(formattedETH.padEnd(8))}  ${chalk.bold.cyanBright(formattedWETH_Sepolia.padEnd(8))}  ${chalk.bold.cyanBright(formattedWETH_Helios.padEnd(8))}`;
+      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(walletHelios.address))}   ${chalk.bold.cyanBright(formattedHLS.padEnd(8))}`;
 
       if (i === selectedWalletIndex) {
         walletInfo.address = walletHelios.address;
         walletInfo.activeAccount = `Account ${i + 1}`;
         walletInfo.balanceHLS = formattedHLS;
-        walletInfo.balanceETH = formattedETH;
-        walletInfo.balanceWETH_Sepolia = formattedWETH_Sepolia;
-        walletInfo.balanceWETH_Helios = formattedWETH_Helios;
       }
       return formattedEntry;
     } catch (error) {
       addLog(`Failed to fetch wallet data for account #${i + 1}: ${error.message}`, "error");
-      return `${i === selectedWalletIndex ? "→ " : "  "}N/A 0.0000 0.0000 0.0000 0.0000`;
+      return `${i === selectedWalletIndex ? "→ " : "  "}N/A 0.0000`;
     }
   });
   try {
@@ -310,60 +288,25 @@ async function getNextNonce(provider, walletAddress) {
   }
 }
 
-async function bridgeSepoliaToHelios(wallet, amount) {
+async function bridgeHeliosToSepoliaHLS(wallet, amount) {
   try {
-    addLog(`Debug: Starting bridge from Sepolia to Helios for ${amount} WETH`, "debug");
+    addLog(`Debug: Starting bridge from Helios to Sepolia for ${amount} HLS`, "debug");
     const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tokenContract = new ethers.Contract(SEPOLIA_WETH_ADDRESS, tokenAbi, wallet);
-    addLog(`Debug: Checking allowance for ${SEPOLIA_ROUTER_ADDRESS} on Sepolia`, "debug");
-    const allowance = await tokenContract.allowance(wallet.address, SEPOLIA_ROUTER_ADDRESS);
-    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} WETH`, "debug");
-    if (allowance < amountWei) {
-      addLog(`Approving ${amount} WETH on Sepolia`, "info");
-      const approveTx = await tokenContract.approve(SEPOLIA_ROUTER_ADDRESS, amountWei);
-      await approveTx.wait();
-      addLog(`Approval Sepolia ⮞ Helios Syccessfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
-    }
-
-    const routerContract = new ethers.Contract(SEPOLIA_ROUTER_ADDRESS, [
-      "function sendToHelios(address _tokenContract, bytes32 _destination, uint256 _amount, string _data)"
-    ], wallet);
-    const destination = ethers.zeroPadValue(ethers.toBeHex(HELIOS_CHAIN_ID), 32);
-    addLog(`Debug: Sending ${amount} WETH to Helios with destination chain ${HELIOS_CHAIN_ID}`, "debug");
-    const tx = await routerContract.sendToHelios(SEPOLIA_WETH_ADDRESS, destination, amountWei, "", {
-      gasLimit: 2000000
-    });
-    const receipt = await tx.wait();
-    if (receipt.status === 0) {
-      addLog(`Bridge transaction reverted: ${JSON.stringify(receipt)}`, "error");
-      throw new Error("Transaction reverted");
-    }
-    addLog(`Bridge Sepolia ⮞ Helios successful: ${getShortHash(tx.hash)}`, "success");
-  } catch (error) {
-    addLog(`Bridge Sepolia ⮞ Helios failed: ${error.message}`, "error");
-    throw error;
-  }
-}
-
-async function bridgeHeliosToSepolia(wallet, amount) {
-  try {
-    addLog(`Debug: Starting bridge from Helios to Sepolia for ${amount} WETH`, "debug");
-    const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tokenContract = new ethers.Contract(HELIOS_WETH_ADDRESS, tokenAbi, wallet);
+    const tokenContract = new ethers.Contract(HLS_TOKEN_ADDRESS, tokenAbi, wallet);
     addLog(`Debug: Checking allowance for ${HELIOS_ROUTER_ADDRESS} on Helios`, "debug");
     const allowance = await tokenContract.allowance(wallet.address, HELIOS_ROUTER_ADDRESS);
-    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} WETH`, "debug");
+    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} HLS`, "debug");
     if (allowance < amountWei) {
-      addLog(`Approving ${amount} WETH on Helios`, "info");
+      addLog(`Approving ${amount} HLS on Helios`, "info");
       const approveTx = await tokenContract.approve(HELIOS_ROUTER_ADDRESS, amountWei);
       await approveTx.wait();
-      addLog(`Approval WETH on Helios Successfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
+      addLog(`Approval HLS on Helios Successfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
     }
 
     const data = "0x7ae4a8ff" +
       ethers.toBeHex(SEPOLIA_CHAIN_ID).slice(2).padStart(64, '0') +
       "00000000000000000000000000000000000000000000000000000000000000a0" +
-      HELIOS_WETH_ADDRESS.toLowerCase().slice(2).padStart(64, '0') +
+      HLS_TOKEN_ADDRESS.toLowerCase().slice(2).padStart(64, '0') +
       ethers.zeroPadValue(ethers.toBeHex(amountWei), 32).slice(2) +
       ethers.toBeHex(ethers.parseUnits("0.5", 18)).slice(2).padStart(64, '0') +
       ethers.toBeHex(wallet.address.length).slice(2).padStart(64, '0') +
@@ -376,16 +319,61 @@ async function bridgeHeliosToSepolia(wallet, amount) {
       chainId: HELIOS_CHAIN_ID,
       nonce: await getNextNonce(wallet.provider, wallet.address)
     };
-    addLog(`Debug: Sending bridge transaction  Helios ⮞ Sepolia: ${JSON.stringify(tx)}`, "debug");
+    addLog(`Debug: Sending bridge transaction Helios ⮞ Sepolia: ${JSON.stringify(tx)}`, "debug");
     const sentTx = await wallet.sendTransaction(tx);
     const receipt = await sentTx.wait();
     if (receipt.status === 0) {
       addLog(`Bridge transaction reverted: ${JSON.stringify(receipt)}`, "error");
       throw new Error("Transaction reverted");
     }
-    addLog(`Bridge Helios ⮞ Sepolia successful: ${getShortHash(sentTx.hash)}`, "success");
+    addLog(`Bridge Helios ⮞ Sepolia successfully: ${getShortHash(sentTx.hash)}`, "success");
   } catch (error) {
     addLog(`Bridge Helios ⮞ Sepolia failed: ${error.message}`, "error");
+    throw error;
+  }
+}
+
+async function bridgeHeliosToBSCHLS(wallet, amount) {
+  try {
+    addLog(`Debug: Starting bridge from Helios to BSC Testnet for ${amount} HLS`, "debug");
+    const amountWei = ethers.parseUnits(amount.toString(), 18);
+    const tokenContract = new ethers.Contract(HLS_TOKEN_ADDRESS, tokenAbi, wallet);
+    addLog(`Debug: Checking allowance for ${HELIOS_ROUTER_ADDRESS} on Helios`, "debug");
+    const allowance = await tokenContract.allowance(wallet.address, HELIOS_ROUTER_ADDRESS);
+    addLog(`Debug: Allowance: ${ethers.formatUnits(allowance, 18)} HLS`, "debug");
+    if (allowance < amountWei) {
+      addLog(`Approving ${amount} HLS on Helios`, "info");
+      const approveTx = await tokenContract.approve(HELIOS_ROUTER_ADDRESS, amountWei);
+      await approveTx.wait();
+      addLog(`Approval HLS on Helios Successfully, Hash: ${getShortHash(approveTx.hash)}`, "success");
+    }
+
+    const data = "0x7ae4a8ff" +
+      ethers.toBeHex(BSC_TESTNET_CHAIN_ID).slice(2).padStart(64, '0') +
+      "00000000000000000000000000000000000000000000000000000000000000a0" +
+      HLS_TOKEN_ADDRESS.toLowerCase().slice(2).padStart(64, '0') +
+      ethers.zeroPadValue(ethers.toBeHex(amountWei), 32).slice(2) +
+      ethers.toBeHex(ethers.parseUnits("0.5", 18)).slice(2).padStart(64, '0') +
+      ethers.toBeHex(wallet.address.length).slice(2).padStart(64, '0') +
+      Buffer.from(`0x${wallet.address.toLowerCase().slice(2)}`).toString('hex').padEnd(64, '0');
+
+    const tx = {
+      to: HELIOS_ROUTER_ADDRESS,
+      data,
+      gasLimit: 2000000,
+      chainId: HELIOS_CHAIN_ID,
+      nonce: await getNextNonce(wallet.provider, wallet.address)
+    };
+    addLog(`Debug: Sending bridge transaction Helios ⮞ BSC Testnet: ${JSON.stringify(tx)}`, "debug");
+    const sentTx = await wallet.sendTransaction(tx);
+    const receipt = await sentTx.wait();
+    if (receipt.status === 0) {
+      addLog(`Bridge transaction reverted: ${JSON.stringify(receipt)}`, "error");
+      throw new Error("Transaction reverted");
+    }
+    addLog(`Bridge Helios ⮞ BSC Testnet Successfully: ${getShortHash(sentTx.hash)}`, "success");
+  } catch (error) {
+    addLog(`Bridge Helios ⮞ BSC Testnet failed: ${error.message}`, "error");
     throw error;
   }
 }
@@ -443,9 +431,7 @@ async function runDailyActivity() {
       const proxyUrl = proxies[accountIndex % proxies.length] || null;
       addLog(`Account ${accountIndex + 1}: Using Proxy ${proxyUrl || "none"}`, "info");
       const providerHelios = getProviderWithProxy(proxyUrl, HELIOS_RPC_URL, HELIOS_CHAIN_ID);
-      const providerSepolia = getProviderWithProxy(proxyUrl, SEPOLIA_RPC_URL, SEPOLIA_CHAIN_ID);
       const walletHelios = new ethers.Wallet(privateKeys[accountIndex], providerHelios);
-      const walletSepolia = new ethers.Wallet(privateKeys[accountIndex], providerSepolia);
       if (!ethers.isAddress(walletHelios.address)) {
         addLog(`Invalid wallet address for account ${accountIndex + 1}: ${walletHelios.address}`, "error");
         continue;
@@ -453,34 +439,30 @@ async function runDailyActivity() {
       addLog(`Processing account ${accountIndex + 1}: ${getShortAddress(walletHelios.address)}`, "wait");
 
       for (let bridgeCount = 0; bridgeCount < dailyActivityConfig.bridgeRepetitions && !shouldStop; bridgeCount++) {
-        const amountWETH = (Math.random() * (dailyActivityConfig.maxWethBridge - dailyActivityConfig.minWethBridge) + dailyActivityConfig.minWethBridge).toFixed(4);
-        const direction = bridgeCount % 2 === 0 ? "Sepolia ⮞ Helios" : "Helios ⮞ Sepolia";
-        addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: ${direction} ${amountWETH} WETH`, "info");
-        
+        const amountHLS = (Math.random() * (dailyActivityConfig.maxHlsBridge - dailyActivityConfig.minHlsBridge) + dailyActivityConfig.minHlsBridge).toFixed(4);
+        const direction = bridgeCount % 2 === 0 ? "Helios ⮞ Sepolia" : "Helios ⮞ BSC";
+        addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: ${direction} ${amountHLS} HLS`, "info");
+
         try {
-          const tokenContract = new ethers.Contract(direction === "Sepolia ⮞ Helios" ? SEPOLIA_WETH_ADDRESS : HELIOS_WETH_ADDRESS, [
-            "function balanceOf(address) view returns (uint256)",
-            "function allowance(address,address) view returns (uint256)",
-            "function approve(address,uint256) returns (bool)"
-          ], direction === "Sepolia ⮞ Helios" ? providerSepolia : providerHelios);
+          const tokenContract = new ethers.Contract(HLS_TOKEN_ADDRESS, tokenAbi, providerHelios);
           const balance = await tokenContract.balanceOf(walletHelios.address);
           const balanceFormatted = ethers.formatUnits(balance, 18);
-          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: WETH Balance: ${balanceFormatted}`, "wait");
-          if (balance < ethers.parseUnits(amountWETH, 18)) {
-            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient WETH balance (${balanceFormatted})`, "error");
+          addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: HLS Balance: ${balanceFormatted}`, "wait");
+          if (balance < ethers.parseUnits(amountHLS, 18)) {
+            addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Insufficient HLS balance (${balanceFormatted})`, "error");
             continue;
           }
-          
-          if (direction === "Sepolia ⮞ Helios") {
-            await bridgeSepoliaToHelios(walletSepolia, amountWETH);
+
+          if (direction === "Helios ⮞ Sepolia") {
+            await bridgeHeliosToSepoliaHLS(walletHelios, amountHLS);
           } else {
-            await bridgeHeliosToSepolia(walletHelios, amountWETH);
+            await bridgeHeliosToBSCHLS(walletHelios, amountHLS);
           }
           await updateWallets();
         } catch (error) {
           addLog(`Account ${accountIndex + 1} - Bridge ${bridgeCount + 1}: Failed: ${error.message}`, "error");
         }
-        
+
         if (bridgeCount < dailyActivityConfig.bridgeRepetitions - 1 && !shouldStop) {
           addLog(`Account ${accountIndex + 1} - Waiting ${dailyActivityConfig.bridgeDelay / 1000} seconds before next bridge...`, "delay");
           await sleep(dailyActivityConfig.bridgeDelay);
@@ -509,10 +491,10 @@ async function runDailyActivity() {
         } catch (error) {
           addLog(`Account ${accountIndex + 1} - Stake ${stakeCount + 1}: Failed: ${error.message}`, "error");
         }
-        
+
         if (stakeCount < dailyActivityConfig.stakeRepetitions - 1 && !shouldStop) {
-          addLog(`Account ${accountIndex + 1} - Waiting ${dailyActivityConfig.bridgeDelay / 1000} seconds before next stake...`, "delay");
-          await sleep(dailyActivityConfig.bridgeDelay);
+          addLog(`Account ${accountIndex + 1} - Waiting ${dailyActivityConfig.stakeDelay / 1000} seconds before next stake...`, "delay");
+          await sleep(dailyActivityConfig.stakeDelay);
         }
       }
 
@@ -635,7 +617,7 @@ const dailyActivitySubMenu = blessed.list({
   style: { fg: "white", bg: "default", border: { fg: "blue" }, selected: { bg: "blue", fg: "black" }, item: { fg: "white" } },
   items: [
     "Set Bridge Repetitions",
-    "Set WETH Range For Bridge",
+    "Set HLS Range For Bridge",
     "Set Stake Repetitions",
     "Set HLS Range For Stake",
     "Back to Main Menu"
@@ -796,8 +778,8 @@ function updateStatus() {
 async function updateWallets() {
   try {
     const walletData = await updateWalletData();
-    const header = `${chalk.bold.cyan("    Address").padEnd(12)}         ${chalk.bold.cyan("HLS".padEnd(8))} ${chalk.bold.cyan("ETH".padEnd(8))} ${chalk.bold.cyan("WETH_S".padEnd(4))}    ${chalk.bold.cyan("WETH_H")}`;
-    const separator = chalk.gray("-".repeat(100));
+    const header = `${chalk.bold.cyan("    Address").padEnd(12)}         ${chalk.bold.cyan("HLS".padEnd(8))}`;
+    const separator = chalk.gray("-".repeat(40));
     walletBox.setItems([header, separator, ...walletData]);
     walletBox.select(0);
     safeRender();
@@ -945,13 +927,13 @@ dailyActivitySubMenu.on("select", (item) => {
         }
       }, 100);
       break;
-    case "Set WETH Range For Bridge":
-      configForm.configType = "wethRangeBridge";
-      configForm.setLabel(" Enter WETH Range for Bridge ");
+    case "Set HLS Range For Bridge":
+      configForm.configType = "hlsRangeBridge";
+      configForm.setLabel(" Enter HLS Range for Bridge ");
       minLabel.show();
       maxLabel.show();
-      configInput.setValue(dailyActivityConfig.minWethBridge.toString());
-      configInputMax.setValue(dailyActivityConfig.maxWethBridge.toString());
+      configInput.setValue(dailyActivityConfig.minHlsBridge.toString());
+      configInputMax.setValue(dailyActivityConfig.maxHlsBridge.toString());
       configInputMax.show();
       configForm.show();
       setTimeout(() => {
@@ -1014,7 +996,7 @@ configForm.on("submit", () => {
   let value, maxValue;
   try {
     value = parseFloat(inputValue);
-    if (configForm.configType === "wethRangeBridge" || configForm.configType === "hlsRangeStake") {
+    if (configForm.configType === "hlsRangeBridge" || configForm.configType === "hlsRangeStake") {
       maxValue = parseFloat(configInputMax.getValue().trim());
       if (isNaN(maxValue) || maxValue <= 0) {
         addLog("Invalid Max value. Please enter a positive number.", "error");
@@ -1042,18 +1024,18 @@ configForm.on("submit", () => {
   if (configForm.configType === "bridgeRepetitions") {
     dailyActivityConfig.bridgeRepetitions = Math.floor(value);
     addLog(`Bridge Repetitions set to ${dailyActivityConfig.bridgeRepetitions}`, "success");
-  } else if (configForm.configType === "wethRangeBridge") {
+  } else if (configForm.configType === "hlsRangeBridge") {
     if (value > maxValue) {
-      addLog("Min WETH cannot be greater than Max WETH.", "error");
+      addLog("Min HLS cannot be greater than Max HLS.", "error");
       configInput.setValue("");
       configInputMax.setValue("");
       screen.focusPush(configInput);
       safeRender();
       return;
     }
-    dailyActivityConfig.minWethBridge = value;
-    dailyActivityConfig.maxWethBridge = maxValue;
-    addLog(`WETH Range for Bridge set to ${dailyActivityConfig.minWethBridge} - ${dailyActivityConfig.maxWethBridge}`, "success");
+    dailyActivityConfig.minHlsBridge = value;
+    dailyActivityConfig.maxHlsBridge = maxValue;
+    addLog(`HLS Range for Bridge set to ${dailyActivityConfig.minHlsBridge} - ${dailyActivityConfig.maxHlsBridge}`, "success");
   } else if (configForm.configType === "stakeRepetitions") {
     dailyActivityConfig.stakeRepetitions = Math.floor(value);
     addLog(`Stake Repetitions set to ${dailyActivityConfig.stakeRepetitions}`, "success");
@@ -1085,7 +1067,7 @@ configForm.on("submit", () => {
 });
 
 configInput.key(["enter"], () => {
-  if (configForm.configType === "wethRangeBridge" || configForm.configType === "hlsRangeStake") {
+  if (configForm.configType === "hlsRangeBridge" || configForm.configType === "hlsRangeStake") {
     screen.focusPush(configInputMax);
   } else {
     configForm.submit();
